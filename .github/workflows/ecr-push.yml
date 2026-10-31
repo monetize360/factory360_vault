@@ -40,14 +40,17 @@ jobs:
         run: make ci-build-ui
       - name: Build Vault binary
         env:
-          BIN_PATH: dist/linux/amd64/
           CGO_ENABLED: 0
           GOOS: linux
           GOARCH: amd64
           GO_TAGS: ui
           REMOVE_SYMBOLS: "1"
           SKIP_GEN: "1"
-        run: make ci-build
+        # ci-build always writes dist/vault; the Dockerfile expects dist/$TARGETOS/$TARGETARCH/vault.
+        run: |
+          make ci-build
+          mkdir -p dist/linux/amd64
+          mv dist/vault dist/linux/amd64/vault
       - id: metadata
         name: Collect build metadata
         run: |

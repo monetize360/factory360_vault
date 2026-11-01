@@ -998,6 +998,9 @@ func (nrw *nonceResponseWriter) WriteHeader(statusCode int) {
 		return
 	}
 	nrw.wroteHeader = true
+	// The wrapped handler set Content-Length for the original body; flush writes
+	// a longer one, so the stale length would truncate the response.
+	nrw.ResponseWriter.Header().Del("Content-Length")
 	nrw.ResponseWriter.WriteHeader(statusCode)
 }
 

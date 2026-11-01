@@ -1,8 +1,12 @@
 # Build the Vault container image (with the web UI) and push it to Amazon ECR
-# on every merge to main.
+# on every merge to main, tagged with the commit SHA. The image is then tested on
+# a throwaway EC2 instance and tagged `latest` only if the tests pass.
 #
-# Required repository variable:
-#   AWS_ECR_ROLE_ARN  - IAM role assumed via GitHub OIDC with push access to the repository
+# Required repository variables:
+#   AWS_ECR_ROLE_ARN            - IAM role assumed via GitHub OIDC (ECR push, EC2 test instance)
+#   EC2_TEST_INSTANCE_PROFILE   - instance profile for the test instance (SSM + ECR pull)
+#   EC2_TEST_SECURITY_GROUP_ID  - security group for the test instance (no inbound rules)
+#   EC2_TEST_SUBNET_ID          - subnet for the test instance (outbound internet access)
 name: ecr-push
 
 on:
@@ -25,6 +29,8 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       # The hosted runner's default free disk is too small to compile Vault.
       - name: Free disk space
@@ -70,7 +76,6 @@ jobs:
           images: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}
           tags: |
             type=sha,format=long,prefix=
-            type=raw,value=latest
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -90,3 +95,31 @@ jobs:
             LICENSE_DEST=/usr/share/doc/vault/LICENSE.txt
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  test-on-ec2:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr-login
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - name: Test image on EC2
+        env:
+          IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          EXPECTED_VERSION: ${{ needs.build-and-push.outputs.version }}
+          EC2_INSTANCE_PROFILE: ${{ vars.EC2_TEST_INSTANCE_PROFILE }}
+          EC2_SECURITY_GROUP_ID: ${{ vars.EC2_TEST_SECURITY_GROUP_ID }}
+          EC2_SUBNET_ID: ${{ vars.EC2_TEST_SUBNET_ID }}
+        run: .github/scripts/ec2-image-test.sh
+      - name: Tag tested image as latest
+        run: |
+          manifest=$(aws ecr batch-get-image --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$GITHUB_SHA" --query 'images[0].imageManifest' --output text)
+          aws ecr put-image --repository-name "$ECR_REPOSITORY" --image-tag latest \
+            --image-manifest "$manifest" > /dev/null 2> put-image.err \
+            || grep -q ImageAlreadyExistsException put-image.err \
+            || { cat put-image.err; exit 1; }
